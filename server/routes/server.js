@@ -123,7 +123,7 @@ module.exports = function (server) {
       //Search Request body
       var searchRequest = {
         index: selectedConfig.es.default_index,
-        size: selectedConfig.max_buckets,
+        size: Math.ceil(selectedConfig.max_buckets * .5),
         body : {
           sort : [{}],
           query : {
@@ -201,7 +201,7 @@ module.exports = function (server) {
         range[selectedConfig.fields.mapping.timestamp].format = 'epoch_millis';
         searchRequest.body.query.bool.filter.bool.must.push(rangeQuery);
       }
-      //console.log(JSON.stringify(searchRequest));
+      console.log(JSON.stringify(searchRequest, null, 2));
 
       callWithRequest(request,'search',searchRequest).then(function (resp) {
         reply({

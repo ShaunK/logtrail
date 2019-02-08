@@ -50,6 +50,7 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
   var selectedIndexConfig = null;
   //Backup for event, with only event Ids as keys
   var eventIds = new Set();
+  var allowTailUpdate = true
 
   function init() {
     
@@ -96,6 +97,11 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
           $scope.userDateTimeSeeked = $routeParams.t;
         }
       }
+
+      if ($routeParams.f) {
+        $scope.focusEventId = $routeParams.f
+      }
+
       initialize();
     });
   };
@@ -103,9 +109,16 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
   function initialize() {
     //Initialize app views on validate successful
     setupHostsList().then(function() {
-      if ($scope.pickedDateTime == null) {
+      if ($scope.focusEventId) {
+        var timestamp = Date.create($scope.pickedDateTime).getTime();
+        console.log(`FOCUS: ${timestamp}`)
+        doSearch('gte', 'asc', ['overwrite','focus'], timestamp);
+        $scope.$apply(updateLiveTailStatus('Go Live'));
+      } else if ($scope.pickedDateTime == null) {
+        console.log(`TAIL`)
         doSearch(null, 'desc', ['overwrite','reverse'], null);
       } else {
+        console.log(`TIMESTAMP SPECIFIED`)
         var timestamp = Date.create($scope.pickedDateTime).getTime();
         doSearch('gt','asc', ['overwrite','scrollToTop'],timestamp);
       }
@@ -120,7 +133,7 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
   timestamp - timestamp for range if available
   **/
   function doSearch(rangeType,order,actions,timestamp) {
-
+    console.log(`DO SEARCH - RANGE TYPE: ${rangeType}, ORDER: ${order}, ACTIONS: ${actions}, TIMESTAMP: ${timestamp}`)
     var request = {
       searchText: searchText,
       timestamp: timestamp,
@@ -130,7 +143,8 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
       config: selectedIndexConfig
     };
 
-    console.debug('sending search request with params ' + JSON.stringify(request));
+    console.log(`SEARCH TIMESTAMP: ${timestamp}`)
+    // console.log('sending search request with params ' + JSON.stringify(request, null, 2));
     $scope.errorMessage = null;
     return $http.post(chrome.addBasePath('/logtrail/search'), request).then(function (resp) {
       if (resp.data.ok) {
@@ -182,6 +196,7 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
   scrollToView - in case of prepend,i.e scrollUp that old event should be visible
   scrollToBottom - Default behavior, no need to pass
   startTimer - start tail timer. Will be invoked duing initialization
+  focus - focus on a particular event id
   */
 
   function updateEventView(events,actions,order) {
@@ -222,7 +237,20 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
         $scope.events.push(event);
         eventIds.add(event.id);
       });
+
+      // Sort events so that events that come in late are in the proper order
+      const comparator = (a, b) => {
+        const aTime = new Date(a.timestamp);
+        const bTime = new Date(b.timestamp);
+        return (aTime > bTime) ? 1 : ((bTime > aTime) ? -1 : 0)
+      };
+
+      $scope.events.sort(comparator)
+      $timeout(function () {
+        window.scrollTo(0,$document.height());
+      });
     }
+
     var firstEventId = null;
     if (actions.indexOf('prepend') !== -1) {
       removeDuplicates(events);
@@ -239,7 +267,18 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
       }
     }
 
-    if (actions.indexOf('scrollToTop') !== -1) {
+    if (actions.indexOf('focus') !== -1) {
+      const focusEventId = $scope.focusEventId
+
+      if (focusEventId !== null) {
+        $timeout(function () {
+          var focusEventElement = document.getElementById(focusEventId);
+          if (focusEventElement !== null) {
+            focusEventElement.scrollIntoView();
+          }
+        });
+      }
+    } else if (actions.indexOf('scrollToTop') !== -1) {
       $timeout(function () {
         window.scrollTo(0,5);
       });
@@ -472,21 +511,29 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
       var scrollTop = angular.element($window).scrollTop();
       var scrollPos = angular.element($window).scrollTop() + angular.element($window).height();
       var docHeight = angular.element($document).height();
+      var adjustedLastEventTime = lastEventTime ? lastEventTime - (selectedIndexConfig.es_index_time_offset_in_seconds * 1000) : null;
+
       if (scrollPos >= docHeight) {
-        if ($scope.events.length > 0) {
-          doSearch('gte', 'asc', ['append','scrollToView'], lastEventTime - (selectedIndexConfig.es_index_time_offset_in_seconds * 1000));
+        if (adjustedLastEventTime && Date.now()  - selectedIndexConfig.es_index_time_offset_in_seconds * 1000 < adjustedLastEventTime) {
+          console.log('Scrolled to bottom, going live')
+          $scope.$apply(updateLiveTailStatus('Live'));
+          doTail();
+        } else {
+          console.log('Scrolled to bottom, fetching more events')
+          doSearch('gte', 'asc', ['append'], adjustedLastEventTime);
         }
-        $scope.$apply(updateLiveTailStatus('Live'));
       } else {
         //When scroll bar is in middle
+        console.log('Scrolled up, switching to go live')
         $scope.$apply(updateLiveTailStatus('Go Live'));
       }
 
       //When scrollbar reaches top & if scroll bar is visible
       if (window.pageYOffset === 0) {
-        // && angular.element($document).height() > angular.element($window).height()) {
         if ($scope.events.length > 0) {
           var timestamp = Date.create($scope.events[0].timestamp).getTime();
+          console.log('Scrolled to top, switching to go live')
+          $scope.$apply(updateLiveTailStatus('Go Live'));
           doSearch('lte', 'desc', ['prepend','scrollToView'], timestamp);
         }
       }
@@ -499,12 +546,16 @@ app.controller('logtrail', function ($scope, kbnUrl, $route, $routeParams,
 
   function doTail() {
     if ($scope.liveTailStatus === 'Live' && !updateViewInProgress) {
-
       var adjustedLastEventTime = null;
       if (lastEventTime) {
         adjustedLastEventTime = lastEventTime - (selectedIndexConfig.es_index_time_offset_in_seconds * 1000);
       }
-      doSearch('gte', 'asc', ['append'], adjustedLastEventTime);
+      if (allowTailUpdate) {
+        allowTailUpdate = false
+        setTimeout(() => allowTailUpdate = true, 3000)
+        doSearch('gte', 'asc', ['append'], adjustedLastEventTime);
+      }
+      window.scrollTo(0,$document.height());
     }
   };
 
